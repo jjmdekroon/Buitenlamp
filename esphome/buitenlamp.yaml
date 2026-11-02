@@ -45,10 +45,10 @@ substitutions:
   pin_led_data: "GPIO5"           # strip data, through the 74AHCT125 (XIAO D3)
   ntp_server_1: "pool.ntp.org"    # internet time servers; host names (FR-020)
   ntp_server_2: "time.cloudflare.com"
-  log_level: "DEBUG"               # INFO when delivered; DEBUG for validation only
-  device_name: "buitenlamp"       # host name, buitenlamp.local; lowercase letters, digits and
+  log_level: "INFO"               # INFO when delivered; DEBUG for validation only
+  device_name: "kantoorlamp"      # host name, kantoorlamp.local; lowercase letters, digits and
                                   # "-" (FR-024)
-  friendly_name: "Buitenlamp"     # name in Home Assistant; at most 32 characters (FR-024)
+  friendly_name: "Buitenlamp (kantoor)"  # name in Home Assistant; at most 32 characters (FR-024)
 
   # ---- Fixed constants (not owner settings) ----
   # Named here so the logic has no magic numbers (constitution V.1). Changing them changes
