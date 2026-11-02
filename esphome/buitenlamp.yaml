@@ -1,0 +1,787 @@
+# Buitenlamp: an outdoor SK6812 RGBW LED strip on an ESP32-C3 that fades on when a PIR sensor
+# sees someone after dark, stays on while they are there and fades off afterwards. Home
+# Assistant sees and controls it over the encrypted native API.
+#
+# Sections, in this order:
+#   1. substitutions: owner settings, then fixed constants
+#   2. esphome (including on_boot), esp32, logger, wifi, api, ota   (platform, network)
+#   3. time, sun                                                    (clock and darkness)
+#   4. light                                       (the strip, the Buitenlamp light in HA)
+#   5. globals, script, interval                                    (lamp logic)
+#   6. binary_sensor, sensor, text_sensor                           (inputs and HA entities)
+#
+# Spec, plan, contracts and validation: specs/001-pir-ledstrip-fade/
+
+# ---------------------------------------------------------------------------------------------
+# 1. Settings
+# ---------------------------------------------------------------------------------------------
+substitutions:
+  # ---- Owner settings ----
+  # Change a value here, then upload over WiFi. The numeric ranges are checked when the
+  # firmware is built (the static_asserts in on_boot), so a value out of range stops the build.
+  fade_in_ms: "1000"              # fade-in time; ms; 100-10000 (FR-002)
+  on_period_ms: "60000"           # on period after the last motion; ms; 1000-86400000 (FR-003)
+  fade_out_ms: "5000"             # fade-out time; ms; 100-60000 (FR-005)
+  pir_stabilization_ms: "30000"   # motion ignored after power-up; ms; 0-120000 (FR-010)
+  pir_min_pulse_ms: "50"          # shortest signal that counts as motion; ms; 1-1000 (FR-011)
+  manual_fallback_ms: "600000"    # time without Home Assistant before manual mode ends; ms;
+                                  # 60000-86400000 (FR-029)
+  num_leds: "26"                  # pixels on the strip; 1-240 (research R3)
+  led_channel_order: "GRBW"       # the strip's channel order; any order of R, G, B and W
+  # Default on-colour and brightness, as a fraction of full (FR-017). These are only used until
+  # a brightness and colour are chosen in Home Assistant; the lamp then keeps the chosen values,
+  # also after a restart, and these no longer have an effect (FR-031).
+  on_red: "0.0"                   # 0.0-1.0 each, not all 0
+  on_green: "0.0"
+  on_blue: "0.0"
+  on_white: "1.0"
+  on_brightness: "1.0"            # 0.01-1.0
+  # Installation location; degrees, north and east positive (FR-019).
+  latitude: "52.0907"             # MUST be set to the installation location; -90 to 90
+  longitude: "5.1214"             # MUST be set to the installation location; -180 to 180
+  # Pins: not GPIO2, 8 or 9 (strapping) or 11-19 (flash, USB), and not the same pin twice.
+  # Must match the pin map in specs/001-pir-ledstrip-fade/contracts/hardware.md.
+  pin_pir: "GPIO4"                # PIR SIG (XIAO D2)
+  pin_led_data: "GPIO5"           # strip data, through the 74AHCT125 (XIAO D3)
+  ntp_server_1: "pool.ntp.org"    # internet time servers; host names (FR-020)
+  ntp_server_2: "time.cloudflare.com"
+  log_level: "DEBUG"               # INFO when delivered; DEBUG for validation only
+  device_name: "buitenlamp"       # host name, buitenlamp.local; lowercase letters, digits and
+                                  # "-" (FR-024)
+  friendly_name: "Buitenlamp"     # name in Home Assistant; at most 32 characters (FR-024)
+
+  # ---- Fixed constants (not owner settings) ----
+  # Named here so the logic has no magic numbers (constitution V.1). Changing them changes
+  # behaviour that the spec fixes.
+  sun_horizon_deg: "-0.83333"     # standard sunrise/sunset elevation; the spec allows no
+                                  # offset (FR-019)
+  led_gamma: "2.8"                # perceptual fade curve (FR-007, research R6)
+  led_max_refresh: "10ms"         # at most 100 frames per second (research R3)
+  daylight_check_interval: "10s"  # how often the sun elevation is recomputed (SC-010)
+  brightness_report_interval: "1s"  # at most one brightness report per second (FR-025)
+  time_retry_interval: "60s"      # retry at least once a minute while the time is unknown
+                                  # (FR-020)
+  # A shared expression, not a setting: the strip's current level, 0-1. The one definition used
+  # by lamp_fade_on, lamp_fade_off and brightness (constitution IV.2).
+  strip_level: "(id(strip).current_values.get_state() * id(strip).current_values.get_brightness())"
+
+# ---------------------------------------------------------------------------------------------
+# 2. Platform and network
+# ---------------------------------------------------------------------------------------------
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.10.1
+  project:
+    name: diy.buitenlamp
+    # 1.1.0: the Buitenlamp entity is a light with brightness and colour instead of a switch
+    # (contracts/ha-api.md, Compatibility rules).
+    version: "1.1.0"
+  # Lamp logic (section 5) that sits here because ESPHome only allows on_boot inside esphome:.
+  on_boot:
+    # FR-013: range checks on the numeric owner settings, done by the compiler, so a value out
+    # of range stops the build (contracts/settings.md). ESPHome itself checks the pins
+    # (including one pin used twice), the channel order, the coordinates and the log level.
+    - lambda: |-
+        static_assert(${fade_in_ms} >= 100 && ${fade_in_ms} <= 10000,
+                      "fade_in_ms must be 100-10000 ms");
+        static_assert(${on_period_ms} >= 1000 && ${on_period_ms} <= 86400000,
+                      "on_period_ms must be 1000-86400000 ms");
+        static_assert(${fade_out_ms} >= 100 && ${fade_out_ms} <= 60000,
+                      "fade_out_ms must be 100-60000 ms");
+        static_assert(${pir_stabilization_ms} >= 0 && ${pir_stabilization_ms} <= 120000,
+                      "pir_stabilization_ms must be 0-120000 ms");
+        static_assert(${pir_min_pulse_ms} >= 1 && ${pir_min_pulse_ms} <= 1000,
+                      "pir_min_pulse_ms must be 1-1000 ms");
+        static_assert(${manual_fallback_ms} >= 60000 && ${manual_fallback_ms} <= 86400000,
+                      "manual_fallback_ms must be 60000-86400000 ms");
+        static_assert(${num_leds} >= 1 && ${num_leds} <= 240,
+                      "num_leds must be 1-240 LEDs");
+        static_assert(${on_red} >= 0.0 && ${on_red} <= 1.0,
+                      "on_red must be 0.0-1.0 (fraction of full)");
+        static_assert(${on_green} >= 0.0 && ${on_green} <= 1.0,
+                      "on_green must be 0.0-1.0 (fraction of full)");
+        static_assert(${on_blue} >= 0.0 && ${on_blue} <= 1.0,
+                      "on_blue must be 0.0-1.0 (fraction of full)");
+        static_assert(${on_white} >= 0.0 && ${on_white} <= 1.0,
+                      "on_white must be 0.0-1.0 (fraction of full)");
+        static_assert(${on_red} + ${on_green} + ${on_blue} + ${on_white} > 0.0,
+                      "on_red, on_green, on_blue, on_white must not all be 0.0 (fraction)");
+        static_assert(${on_brightness} >= 0.01 && ${on_brightness} <= 1.0,
+                      "on_brightness must be 0.01-1.0 (fraction of full)");
+    # FR-031: loads the stored on-setting into the strip's target values, so a plain "on" from
+    # Home Assistant uses it, and clears lamp_call_active, which ignored the light's own call
+    # at boot (research R18). The strip is already off, so nothing visible happens.
+    - script.execute: lamp_fade_off
+    # FR-025: every boot starts in automatic mode. After this, scripts publish Mode only when
+    # it changes.
+    - text_sensor.template.publish:
+        id: mode_text
+        state: "automatic"
+    # FR-010: the PIR output is unreliable while it warms up, so motion is ignored until
+    # pir_ready is set (data-model T12).
+    - logger.log:
+        level: DEBUG
+        tag: lamp
+        format: "t=%lu boot, PIR stabilizing"
+        args: ['(unsigned long) millis()']
+    - delay: ${pir_stabilization_ms}ms
+    - globals.set:
+        id: pir_ready
+        value: 'true'
+    - logger.log:
+        level: DEBUG
+        tag: lamp
+        format: "t=%lu PIR ready"
+        args: ['(unsigned long) millis()']
+
+esp32:
+  # No board key: the variant alone assumes a standard 4 MB devkit (research R2).
+  variant: esp32c3
+  framework:
+    type: esp-idf
+  # watchdog_timeout stays at its 5 s default and is never disabled, so a hung loop resets the
+  # board instead of leaving the strip stuck (constitution I.3, research R13).
+
+logger:
+  level: ${log_level}
+
+# There is no web_server, captive_portal or access point (constitution V.5).
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # 0 s: a reboot turns the light off, so losing WiFi must never reset the lamp (FR-014).
+  reboot_timeout: 0s
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # 0 s: a reboot turns the light off, so losing Home Assistant must never reset the lamp
+  # (FR-028).
+  reboot_timeout: 0s
+  # FR-029
+  # Note: `esphome logs` also subscribes to states, so use --no-states when testing the
+  # fallback; otherwise the log viewer counts as Home Assistant.
+  on_client_connected:
+    # This trigger fires before the client subscribes to states, so the api.connected
+    # condition below is still false here (research R10). fallback_timer checks for Home
+    # Assistant itself when it expires.
+    - logger.log:
+        level: DEBUG
+        tag: lamp
+        format: "t=%lu API client connected"
+        args: ['(unsigned long) millis()']
+  on_client_disconnected:
+    - logger.log:
+        level: DEBUG
+        tag: lamp
+        format: "t=%lu API client disconnected"
+        args: ['(unsigned long) millis()']
+    # This trigger fires after the client has been removed, so the condition sees only the
+    # clients that are left (research R10).
+    - if:
+        condition:
+          not:
+            api.connected:
+              state_subscription_only: true
+        then:
+          - script.execute: fallback_timer
+
+ota:
+  - platform: esphome
+    # No key of its own: OTA reuses the API encryption key, the spec's "update password"
+    # (FR-030, research R12). No password and no safe_mode block.
+    encryption:
+
+# ---------------------------------------------------------------------------------------------
+# 3. Clock and darkness
+# ---------------------------------------------------------------------------------------------
+# FR-020
+# Both sources set the one system clock, so whichever answers first makes the time known. Each
+# re-syncs every 15 min while it can be reached (research R8).
+time:
+  - platform: sntp
+    id: sntp_time
+    servers:
+      - ${ntp_server_1}
+      - ${ntp_server_2}
+    on_time_sync:
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu time synced (sntp)"
+          args: ['(unsigned long) millis()']
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu time synced (home assistant)"
+          args: ['(unsigned long) millis()']
+
+# FR-019, FR-021
+# Darkness comes from the sun's elevation, not the local clock, so summer and winter time
+# cannot shift it (research R7).
+sun:
+  latitude: ${latitude}
+  longitude: ${longitude}
+  time_id: sntp_time
+
+# ---------------------------------------------------------------------------------------------
+# 4. The strip
+# ---------------------------------------------------------------------------------------------
+# FR-024, FR-025, FR-027
+# The strip is the Buitenlamp light in Home Assistant: on/off, brightness and colour.
+light:
+  - platform: esp32_rmt_led_strip
+    id: strip
+    # No name of its own: it takes the device name Buitenlamp and the object id buitenlamp.
+    name: None
+    pin: ${pin_led_data}
+    num_leds: ${num_leds}
+    chipset: SK6812
+    channel_colors: ${led_channel_order}
+    # The ESP32-C3 has no PSRAM; the default is true.
+    use_psram: false
+    # Off at every boot and never saved to flash (FR-009, constitution I.1). Set explicitly,
+    # because the default changed in 2026.10.0.
+    restore_mode: ALWAYS_OFF
+    # Equal brightness steps look like equal steps of light (FR-007, research R6).
+    gamma_correct: ${led_gamma}
+    max_refresh_rate: ${led_max_refresh}
+    # Used only by Home Assistant's own calls, so a brightness or colour change fades instead of
+    # jumping. The fade scripts always pass their own length.
+    default_transition_length: ${fade_in_ms}ms
+    # No effects: the whole strip always shows one colour (FR-016).
+    # Every light call runs on_state synchronously. The fade scripts set lamp_call_active around
+    # their calls, so with the flag clear the call came from Home Assistant (research R18).
+    on_state:
+      - if:
+          condition:
+            lambda: 'return !id(lamp_call_active);'
+          then:
+            - script.execute: ha_command
+
+# ---------------------------------------------------------------------------------------------
+# 5. Lamp logic
+# ---------------------------------------------------------------------------------------------
+# The lamp's state is never saved, so every boot starts from these values (FR-009, FR-030).
+# Only the on-setting (chosen_*) is saved, and only when it changes (FR-031).
+globals:
+  # False during the stabilization period after boot (FR-010).
+  - id: pir_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # The current motion counted for automatic switching (FR-018, FR-029).
+  - id: motion_counted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # The length of the fade being started, so one calculation serves both the log line and the
+  # light call. Only lamp_fade_on and lamp_fade_off set and read it.
+  - id: fade_length_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # True after an "on" from Home Assistant, until "off" or the fallback (FR-027, FR-029).
+  - id: manual_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Set by "off" while motion is active, and cleared when that motion ends, so a PIR still
+  # HIGH from someone standing there cannot switch the light straight back on (FR-027;
+  # data-model.md, "Why need_fresh_motion exists").
+  - id: need_fresh_motion
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # True while lamp_fade_on or lamp_fade_off calls the light, so the strip's on_state can tell
+  # those calls from Home Assistant commands. Starts true, so the light's own call at boot is
+  # ignored; on_boot clears it through lamp_fade_off (FR-027, research R18).
+  - id: lamp_call_active
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  # The on-setting: the brightness and colour every "on" uses, from motion and from Home
+  # Assistant. Set by ha_command; saved in flash only when it changes (FR-017, FR-031).
+  - id: chosen_brightness
+    type: float
+    restore_value: yes
+    initial_value: '${on_brightness}'
+  # Brightness of the RGB part relative to white, as Home Assistant sends it.
+  - id: chosen_color_brightness
+    type: float
+    restore_value: yes
+    initial_value: '1.0'
+  - id: chosen_red
+    type: float
+    restore_value: yes
+    initial_value: '${on_red}'
+  - id: chosen_green
+    type: float
+    restore_value: yes
+    initial_value: '${on_green}'
+  - id: chosen_blue
+    type: float
+    restore_value: yes
+    initial_value: '${on_blue}'
+  - id: chosen_white
+    type: float
+    restore_value: yes
+    initial_value: '${on_white}'
+
+script:
+  # FR-002, FR-006, FR-007, FR-017
+  # One of the only two places that call the light (constitution IV.2). A new transition starts
+  # from the light's current values, so a fade never jumps (research R6).
+  - id: lamp_fade_on
+    mode: restart
+    then:
+      # Only the newest fade logs "fade complete".
+      - script.stop: lamp_fade_off
+      # Normal rate from a partial level: the part of a full fade-in (0 to the chosen
+      # brightness) that is left (FR-006, FR-017).
+      - globals.set:
+          id: fade_length_ms
+          value: !lambda |-
+            return (uint32_t) (${fade_in_ms} * fminf(1.0f,
+                fabsf(id(chosen_brightness) - ${strip_level}) / id(chosen_brightness)));
+      # Nothing to do when the target is already on and the level is already there. A colour
+      # change from Home Assistant then finishes with its own fade (default_transition_length).
+      - if:
+          condition:
+            lambda: 'return !(id(strip).remote_values.is_on() && id(fade_length_ms) == 0);'
+          then:
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu fade on, %lu ms"
+                args: ['(unsigned long) millis()', '(unsigned long) id(fade_length_ms)']
+            - globals.set:
+                id: lamp_call_active
+                value: 'true'
+            - light.turn_on:
+                id: strip
+                brightness: !lambda 'return id(chosen_brightness);'
+                color_brightness: !lambda 'return id(chosen_color_brightness);'
+                red: !lambda 'return id(chosen_red);'
+                green: !lambda 'return id(chosen_green);'
+                blue: !lambda 'return id(chosen_blue);'
+                white: !lambda 'return id(chosen_white);'
+                transition_length: !lambda 'return id(fade_length_ms);'
+            - globals.set:
+                id: lamp_call_active
+                value: 'false'
+            - wait_until:
+                condition:
+                  lambda: 'return !id(strip).is_transformer_active();'
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu fade complete"
+                args: ['(unsigned long) millis()']
+
+  # FR-005, FR-008, FR-027, FR-031
+  # The other place that calls the light. At the end of a turn-off transition the state is 0,
+  # so every channel is fully off.
+  - id: lamp_fade_off
+    mode: restart
+    then:
+      - script.stop: lamp_fade_on
+      # Normal rate from a partial level, for example an "off" from Home Assistant during a
+      # fade-in: the part of a full fade-out (the chosen brightness to 0) that is left (FR-027).
+      - globals.set:
+          id: fade_length_ms
+          value: !lambda |-
+            return (uint32_t) (${fade_out_ms} * fminf(1.0f,
+                ${strip_level} / id(chosen_brightness)));
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu fade off, %lu ms"
+          args: ['(unsigned long) millis()', '(unsigned long) id(fade_length_ms)']
+      - globals.set:
+          id: lamp_call_active
+          value: 'true'
+      # Off, but with the on-setting as target values, so a plain "on" from Home Assistant uses
+      # it (FR-031). The fade-out itself keeps the current colour.
+      - light.control:
+          id: strip
+          state: false
+          brightness: !lambda 'return id(chosen_brightness);'
+          color_brightness: !lambda 'return id(chosen_color_brightness);'
+          red: !lambda 'return id(chosen_red);'
+          green: !lambda 'return id(chosen_green);'
+          blue: !lambda 'return id(chosen_blue);'
+          white: !lambda 'return id(chosen_white);'
+          transition_length: !lambda 'return id(fade_length_ms);'
+      - globals.set:
+          id: lamp_call_active
+          value: 'false'
+      - wait_until:
+          condition:
+            lambda: 'return !id(strip).is_transformer_active();'
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu fade complete"
+          args: ['(unsigned long) millis()']
+
+  # FR-003, FR-005, FR-018
+  # A script delay runs on ESPHome's 64-bit scheduler, so the millis() rollover cannot affect
+  # it (FR-015, research R11).
+  - id: on_period_timer
+    mode: restart
+    then:
+      - delay: ${on_period_ms}ms
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu on period ended"
+          args: ['(unsigned long) millis()']
+      # Expiring in ManualOn changes nothing. A running timer only tells fallback_timer that
+      # there was recent motion.
+      - if:
+          condition:
+            lambda: 'return !id(manual_mode);'
+          then:
+            - script.execute: lamp_fade_off
+
+  # FR-002, FR-004, FR-006, FR-018, FR-023, FR-027
+  # The only place where "motion counts" is decided. A motion that starts in daylight never
+  # counts, even if it lasts into the dark, so motion after sunrise cannot extend a running on
+  # period (research R11).
+  - id: motion_started
+    then:
+      - if:
+          # "Daylight not ON" means dark, or the time is unknown. After an "off" from Home
+          # Assistant, the motion that was going on must end first.
+          condition:
+            and:
+              - not:
+                  binary_sensor.is_on: daylight
+              - lambda: 'return !id(need_fresh_motion);'
+          then:
+            - globals.set:
+                id: motion_counted
+                value: 'true'
+            # Otherwise an on period left over from an earlier motion could run out while this
+            # motion lasts (data-model T3).
+            - script.stop: on_period_timer
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu motion ON, counted"
+                args: ['(unsigned long) millis()']
+            # Start a fade only when the target is off (off or fading out), so a running
+            # fade-in is never restarted (data-model T3). In ManualOn the motion is recorded
+            # above, but the light is not touched.
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return !id(manual_mode);'
+                    - lambda: 'return !id(strip).remote_values.is_on();'
+                then:
+                  - script.execute: lamp_fade_on
+          else:
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu motion ON, ignored (%s)"
+                args:
+                  - '(unsigned long) millis()'
+                  - 'id(need_fresh_motion) ? "fresh motion needed" : "daylight"'
+
+  # FR-003, FR-004, FR-027
+  # The on period counts from the end of the counted motion (research R11).
+  - id: motion_ended
+    then:
+      - globals.set:
+          id: need_fresh_motion
+          value: 'false'
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu motion OFF"
+          args: ['(unsigned long) millis()']
+      - if:
+          condition:
+            lambda: 'return id(motion_counted);'
+          then:
+            - globals.set:
+                id: motion_counted
+                value: 'false'
+            - script.execute: on_period_timer
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu on period started"
+                args: ['(unsigned long) millis()']
+
+  # FR-018, FR-023
+  # A motion still going at sunrise ends there, so the on period runs from sunrise and the
+  # light fades out normally even if the person keeps moving (FR-018, data-model T13).
+  # ESPHome does not fire on_press for daylight's first state, so when the time first becomes
+  # known in daytime this script does not run: a counted motion made while the time was unknown
+  # just runs to its end, which FR-023 allows.
+  - id: dark_period_ended
+    then:
+      - if:
+          condition:
+            lambda: 'return id(motion_counted);'
+          then:
+            - globals.set:
+                id: motion_counted
+                value: 'false'
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu dark period ended, motion no longer counted"
+                args: ['(unsigned long) millis()']
+            - script.execute: on_period_timer
+
+  # FR-027, FR-031
+  # A command from Home Assistant on the Buitenlamp light (data-model T7, T9). Home Assistant
+  # sends a new brightness or colour as "on" too, so every "on" means manual mode; its target
+  # values become the on-setting for every later "on", from motion too.
+  - id: ha_command
+    then:
+      - if:
+          condition:
+            lambda: 'return id(strip).remote_values.is_on();'
+          then:
+            - lambda: |-
+                const auto &target = id(strip).remote_values;
+                id(chosen_brightness) = target.get_brightness();
+                id(chosen_color_brightness) = target.get_color_brightness();
+                id(chosen_red) = target.get_red();
+                id(chosen_green) = target.get_green();
+                id(chosen_blue) = target.get_blue();
+                id(chosen_white) = target.get_white();
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu on from Home Assistant, brightness %.2f"
+                args: ['(unsigned long) millis()', 'id(chosen_brightness)']
+            - script.execute: manual_on
+          else:
+            - script.execute: manual_off
+
+  # FR-027
+  # "On" from Home Assistant: manual mode until "off" (data-model T7). An "on" while the light
+  # is already on from motion gives no visible change, but the mode still becomes manual.
+  - id: manual_on
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(manual_mode);'
+          then:
+            - globals.set:
+                id: manual_mode
+                value: 'true'
+            - text_sensor.template.publish:
+                id: mode_text
+                state: "manual"
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu mode manual"
+                args: ['(unsigned long) millis()']
+      - script.execute: lamp_fade_on
+
+  # FR-027
+  # "Off" from Home Assistant: automatic mode and fade out (data-model T9). A motion still
+  # going on must end before the next detection can switch the light on.
+  - id: manual_off
+    then:
+      - globals.set:
+          id: need_fresh_motion
+          value: !lambda 'return id(motion).state;'
+      - globals.set:
+          id: motion_counted
+          value: 'false'
+      - script.stop: on_period_timer
+      - if:
+          condition:
+            lambda: 'return id(manual_mode);'
+          then:
+            - globals.set:
+                id: manual_mode
+                value: 'false'
+            - text_sensor.template.publish:
+                id: mode_text
+                state: "automatic"
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu mode automatic"
+                args: ['(unsigned long) millis()']
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu off from Home Assistant"
+          args: ['(unsigned long) millis()']
+      - script.execute: lamp_fade_off
+
+  # FR-029
+  # Started when the last Home Assistant client disconnects (data-model T10, T11). Home
+  # Assistant is checked here, when the timer expires, because on_client_connected fires before
+  # Home Assistant subscribes to states (research R10), so a reconnect cannot stop this timer.
+  # Every disconnect restarts it, so the lamp falls back only after ${manual_fallback_ms} ms
+  # without Home Assistant.
+  - id: fallback_timer
+    mode: restart
+    then:
+      - delay: ${manual_fallback_ms}ms
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(manual_mode);'
+              - not:
+                  api.connected:
+                    state_subscription_only: true
+          then:
+            - globals.set:
+                id: manual_mode
+                value: 'false'
+            - text_sensor.template.publish:
+                id: mode_text
+                state: "automatic"
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu Home Assistant unreachable, mode automatic"
+                args: ['(unsigned long) millis()']
+            # Recent motion in the dark keeps the light on as in AutoOn; the on period then
+            # ends it as usual.
+            - if:
+                condition:
+                  and:
+                    - not:
+                        binary_sensor.is_on: daylight
+                    - or:
+                        - lambda: 'return id(motion_counted);'
+                        - script.is_running: on_period_timer
+                then:
+                  - logger.log:
+                      level: DEBUG
+                      tag: lamp
+                      format: "t=%lu stays on (recent motion in the dark)"
+                      args: ['(unsigned long) millis()']
+                else:
+                  - script.execute: lamp_fade_off
+
+# FR-020
+interval:
+  # Retry both time sources once a minute until the time is known.
+  - interval: ${time_retry_interval}
+    then:
+      - if:
+          condition:
+            not:
+              time.has_time:
+                id: sntp_time
+          then:
+            - component.update: sntp_time
+            - component.update: ha_time
+            - logger.log:
+                level: DEBUG
+                tag: lamp
+                format: "t=%lu time unknown, retrying"
+                args: ['(unsigned long) millis()']
+
+# ---------------------------------------------------------------------------------------------
+# 6. Inputs and Home Assistant entities
+# ---------------------------------------------------------------------------------------------
+binary_sensor:
+  # Internal inputs
+
+  # FR-001, FR-011, FR-012
+  - platform: gpio
+    id: pir_raw
+    name: "PIR raw"
+    internal: true
+    pin:
+      number: ${pin_pir}
+      mode:
+        input: true
+        # With the pull-down, a disconnected sensor reads "no motion" (FR-012).
+        pulldown: true
+    # Signals shorter than pir_min_pulse_ms never count, on either edge (FR-011,
+    # constitution I.5).
+    filters:
+      - delayed_on: ${pir_min_pulse_ms}ms
+      - delayed_off: ${pir_min_pulse_ms}ms
+    # Read by the sensor check in section 7 of the quickstart.
+    on_state:
+      - logger.log:
+          level: DEBUG
+          tag: lamp
+          format: "t=%lu PIR raw %s"
+          args: ['(unsigned long) millis()', 'x ? "ON" : "OFF"']
+
+  # Home Assistant entities
+
+  # FR-001, FR-010, FR-025
+  # Motion during stabilization is neither reported nor acted on.
+  - platform: template
+    id: motion
+    name: "Motion"
+    device_class: motion
+    lambda: 'return id(pir_ready) && id(pir_raw).state;'
+    on_press:
+      - script.execute: motion_started
+    on_release:
+      - script.execute: motion_ended
+
+  # FR-018, FR-019, FR-023, FR-025
+  # No state means the time is unknown, and the logic treats that like dark (FR-023).
+  - platform: template
+    id: daylight
+    name: "Daylight"
+    device_class: light
+    lambda: |-
+      if (std::isnan(id(sun_elevation).state)) {
+        return {};
+      }
+      return id(sun_elevation).state >= ${sun_horizon_deg};
+    on_press:
+      - script.execute: dark_period_ended
+
+sensor:
+  # Internal inputs
+
+  # FR-019
+  # The value is NaN until the time is known (research R7).
+  - platform: sun
+    type: elevation
+    id: sun_elevation
+    name: "Sun elevation"
+    internal: true
+    update_interval: ${daylight_check_interval}
+
+  # Home Assistant entities
+
+  # FR-025
+  - platform: template
+    id: brightness
+    name: "Brightness"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: ${brightness_report_interval}
+    lambda: 'return roundf(${strip_level} * 100.0f);'
+    # Values are whole percents, so any change gets through and an unchanged value is not sent.
+    filters:
+      - delta: 0.5
+
+# FR-025
+text_sensor:
+  # Scripts publish Mode only when it changes, so no text is built over and over (research R9,
+  # constitution III.1).
+  - platform: template
+    id: mode_text
+    name: "Mode"
+    update_interval: never
