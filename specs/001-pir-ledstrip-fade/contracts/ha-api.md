@@ -10,14 +10,14 @@ not listed here is not part of the contract. This replaces the earlier MQTT cont
 
 | Item | Value |
 |------|-------|
-| ESPHome `name` (host name) | `${device_name}`, default `buitenlamp` → `buitenlamp.local` |
-| Friendly name (device name in Home Assistant) | `${friendly_name}`, default `Buitenlamp` |
+| ESPHome `name` (host name) | `${device_name}`, default `kantoorlamp` → `kantoorlamp.local` (renamed from `buitenlamp` in commit e1dc5dc) |
+| Friendly name (device name in Home Assistant) | `${friendly_name}`, default `Buitenlamp (kantoor)` (renamed in commit e1dc5dc) |
 | Project (shown as model and firmware version) | `esphome: project: name: diy.buitenlamp`, `version: "1.1.0"` (1.0.0 had a switch instead of the light; see Compatibility rules) |
 | Discovery | mDNS service `_esphomelib._tcp`, advertised automatically |
 | Port | 6053 (ESPHome default) |
 | Encryption | Noise, with the 32-byte base64 key `api_encryption_key` from `secrets.yaml` |
 
-**Adding the device** (FR-024, SC-012): Home Assistant shows "Discovered: Buitenlamp". The owner
+**Adding the device** (FR-024, SC-012): Home Assistant shows "Discovered: Buitenlamp (kantoor)". The owner
 clicks **Add** and pastes the encryption key. No address is typed.
 
 ## Entities

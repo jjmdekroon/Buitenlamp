@@ -81,13 +81,13 @@ Replace `COM5` with the board's port (Device Manager → Ports). Every later upl
 WiFi:
 
 ```powershell
-.venv\Scripts\esphome upload esphome/buitenlamp.yaml --device buitenlamp.local
+.venv\Scripts\esphome upload esphome/buitenlamp.yaml --device kantoorlamp.local
 ```
 
 To watch the log, use either of these:
 
 ```powershell
-.venv\Scripts\esphome logs esphome/buitenlamp.yaml --device buitenlamp.local --no-states
+.venv\Scripts\esphome logs esphome/buitenlamp.yaml --device kantoorlamp.local --no-states
 .venv\Scripts\esphome logs esphome/buitenlamp.yaml --device COM5
 ```
 
@@ -146,7 +146,7 @@ Buitenlamp) and its history.
 | V18 | Manual fallback | In daytime: turn on from Home Assistant, then disable the entry. Repeat with re-enabling after 5 min | 10–11 min after disabling, the light fades out and the log shows Mode = automatic. With the 5 min interruption it stays on | FR-029, SC-015 |
 | V19 | Daylight unknown | During V11, look at Daylight in Home Assistant once it reconnects, before the first time sync | Daylight showed *unknown* while the time was unknown | FR-023 |
 | V20 | Power cut in manual mode | Turn on from Home Assistant, then power-cycle | The lamp starts off and in automatic mode; Home Assistant shows Buitenlamp = off, Mode = automatic | FR-009, edge case |
-| V21 | Timing change over WiFi | Set `on_period_ms` to `"120000"`, upload over WiFi, repeat V4 | On period 120–121 s; nothing else changes; edit plus upload under 5 min with the enclosure closed. Restore the default afterwards | Story 5, FR-013, FR-030, SC-008 |
+| V21 | Timing change over WiFi | Set `on_period_ms` to `"120000"`, upload over WiFi, repeat V4. *From 1.2.0: set `on_period_s` to `"120"`; the YAML value only applies while no On period has been chosen in Home Assistant (002)* | On period 120–121 s; nothing else changes; edit plus upload under 5 min with the enclosure closed. Restore the default afterwards | Story 5, FR-013, FR-030, SC-008 |
 | V22 | Long run | Leave running for 60 days without a restart, then repeat V3 and V4 | Timings unchanged (started at delivery; see Complexity Tracking) | FR-015, SC-007 |
 | V23 | Time from Home Assistant only | In daytime, unplug the router's internet (WAN) cable, keeping the LAN and Home Assistant up; power-cycle the lamp; wave after 30 s | The log shows `time synced (home assistant)` with `t=` under 60000 (within 60 s of power-up) and no `time synced (sntp)`; Daylight = on; the motion is ignored | FR-020 |
 | V24 | Update protection and restart | (a) Copy the project, change `api_encryption_key` in the copy's `secrets.yaml`, and try a WiFi upload from the copy while the light is on. (b) Do a normal WiFi upload while the light is on | (a) The upload is refused; the light and timing carry on without interruption. (b) The lamp restarts, comes up off and in automatic mode, and ignores motion for 30 s | FR-030 |

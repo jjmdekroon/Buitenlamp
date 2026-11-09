@@ -463,6 +463,9 @@ lamp is off and in automatic mode. It is not built now (YAGNI).
   and writes flash at most once per `flash_write_interval` (default 60 s) *(verified in
   source: `globals_component.h`, `preferences/__init__.py`)*. Motion never changes them, so
   only choices in Home Assistant cause writes.
+  *Superseded in part on 2026-11-09 (002 research S8)*: from 1.2.0, `flash_write_interval` is
+  500 ms, so a chosen brightness and colour is in flash within 1.5 s instead of within 60 s.
+  See [002 research.md](../002-ha-tunable-settings/research.md).
 
 **Alternatives considered**:
 - *Keep the switch and add a brightness `number` and a colour `select` with presets*: keeps

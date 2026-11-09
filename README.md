@@ -4,14 +4,16 @@ An outdoor LED strip that fades on when someone walks past after dark. An ESP32-
 [ESPHome](https://esphome.io) reads a PIR motion sensor and drives an SK6812 RGBW strip.
 
 - After dark, motion fades the strip on in 1 s. It stays on until 60 s after the last motion,
-  then fades off over 5 s.
+  then fades off over 5 s. These are the defaults: the on period, both fade times, a daily
+  time window and when the lamp reacts can be changed in Home Assistant.
 - Darkness is worked out from sunset and sunrise at your location. There is no light sensor.
 - Home Assistant shows the lamp as Buitenlamp (a light with on/off, brightness and colour),
-  Motion, Daylight, Brightness and Mode. The brightness and colour you choose are used every
-  time the lamp turns on, by motion too, and are remembered after a power cut.
+  Motion, Daylight, In time window, Brightness and Mode, plus six settings. The brightness and
+  colour you choose are used every time the lamp turns on, by motion too, and are remembered
+  after a power cut.
 - The lamp keeps working without WiFi or Home Assistant.
-- Every setting is in one block at the top of `esphome/buitenlamp.yaml`. To change a setting,
-  edit the value and upload over WiFi.
+- The six settings above are changed in Home Assistant. Every other setting is in one block at
+  the top of `esphome/buitenlamp.yaml`: to change it, edit the value and upload over WiFi.
 
 ## What's in this repository
 
@@ -22,6 +24,7 @@ An outdoor LED strip that fades on when someone walks past after dark. An ESP32-
 | `esphome/secrets.yaml` | your own copy with the real values (never committed) |
 | [requirements.txt](requirements.txt) | the pinned ESPHome version, 2026.10.1 |
 | [specs/001-pir-ledstrip-fade/](specs/001-pir-ledstrip-fade/) | spec, plan, wiring and the full test procedure |
+| [specs/002-ha-tunable-settings/](specs/002-ha-tunable-settings/) | the settings in Home Assistant (version 1.2.0): spec, plan and tests |
 
 ## Before you start
 
@@ -74,6 +77,7 @@ In the `substitutions:` block at the top of `esphome/buitenlamp.yaml`, set these
 |---------|---------------|
 | `latitude`, `longitude` | Where the lamp is installed, in decimal degrees, north and east positive. The values in the file are an example (Utrecht). Darkness is worked out from these, so wrong values make the lamp react at the wrong times. In OpenStreetMap or Google Maps, right-click the spot to copy its coordinates. |
 | `num_leds` | The number of pixels on your strip, 1–240. |
+| `timezone` | Your time zone, for the time window, for example `"Europe/Amsterdam"`. It must be the same zone as Home Assistant's (Settings → System → General), because the lamp uses Home Assistant's zone while it is connected. |
 | `log_level` | `"DEBUG"` for now. The tests in step 5 read timestamps from the debug log. Step 6 sets it back to `"INFO"`. |
 
 Then check that the firmware builds:
@@ -132,13 +136,13 @@ each other.
 3. From now on, build and upload over WiFi:
 
    ```powershell
-   .venv\Scripts\esphome run esphome/buitenlamp.yaml --device buitenlamp.local --no-states
+   .venv\Scripts\esphome run esphome/buitenlamp.yaml --device kantoorlamp.local --no-states
    ```
 
    To only watch the log, without uploading:
 
    ```powershell
-   .venv\Scripts\esphome logs esphome/buitenlamp.yaml --device buitenlamp.local --no-states
+   .venv\Scripts\esphome logs esphome/buitenlamp.yaml --device kantoorlamp.local --no-states
    ```
 
    Always add `--no-states` when you watch the log over WiFi. Without it, the log viewer counts
@@ -149,11 +153,11 @@ each other.
 > built last, so your change would not reach the board. The first log lines show when the
 > firmware on the board was built ("compiled on …").
 4. In Home Assistant, open Settings → Devices & services. You should see **New device
-   discovered: Buitenlamp**. Click **Add** and paste `api_encryption_key`. You do not need to
-   type an address. Note how long discovery took, because test V13 needs it.
+   discovered: Buitenlamp (kantoor)**. Click **Add** and paste `api_encryption_key`. You do
+   not need to type an address. Note how long discovery took, because test V13 needs it.
 
-The device page now shows five entities: Buitenlamp (light), Motion, Daylight, Brightness and
-Mode.
+The device page now shows Buitenlamp (light), Motion, Daylight, In time window, Brightness and
+Mode, and the six settings under **Configuration** (see below).
 
 **Updating from version 1.0.0?** Version 1.0.0 had a switch called Buitenlamp; 1.1.0 replaces
 it with a light of the same name. After the update, the old switch shows as unavailable.
@@ -169,8 +173,48 @@ Delete it on the device page, and change any automations or dashboards from
 3. Switch the lamp off in Home Assistant. It fades out and returns to **automatic** mode.
 
 From then on, every "on" uses the chosen brightness and colour, both from motion and from Home
-Assistant. The lamp remembers them after a power cut or update. The `on_*` values in
-`esphome/buitenlamp.yaml` are only the starting values until you choose your own.
+Assistant. The lamp remembers them after a power cut or update; a choice is stored within
+2 seconds. The `on_*` values in `esphome/buitenlamp.yaml` are only the starting values until
+you choose your own.
+
+### Settings in Home Assistant
+
+Open the lamp's device page in Home Assistant (Settings → Devices & services → ESPHome → the
+lamp). The section **Configuration** holds six settings:
+
+| Setting | Range | Default | What it does |
+|---------|-------|---------|--------------|
+| On period | 1–86400 s, steps of 1 s | 60 s | how long the light stays on after the sensor stops reporting motion |
+| Fade-in time | 0.1–10 s, steps of 0.1 s | 1.0 s | time of a full fade from off to on; also used for brightness and colour changes from Home Assistant |
+| Fade-out time | 0.1–60 s, steps of 0.1 s | 5.0 s | time of a full fade from on to off |
+| Time window start | a time of day | 00:00 | first minute of the daily time window |
+| Time window end | a time of day | 00:00 | first minute **after** the time window |
+| Reaction mode | four choices, below | `only when dark` | when motion switches the lamp on |
+
+The four reaction modes:
+- `only when dark`: after sunset and before sunrise, whatever the time window. This is how
+  the lamp worked before 1.2.0.
+- `only in time window`: inside the time window, whether it is dark or light.
+- `in time window and dark`: inside the time window and dark.
+- `always`: at any time.
+
+The time window:
+- The end minute is outside the window: 08:00–17:00 covers 08:00 up to and including 16:59.
+- Equal start and end, such as the default 00:00–00:00, means no restriction.
+- An end before the start crosses midnight, for example 22:00–06:00.
+- **In time window** (under the status entities) shows whether the window is active now.
+
+Good to know:
+- A change applies from the next on period or fade. A running one finishes with the value it
+  started with.
+- A change is stored on the lamp within 2 seconds, so it is kept after a power cut, restart or
+  update.
+- The matching values in `esphome/buitenlamp.yaml` (`on_period_s`, `fade_in_s`, `fade_out_s`,
+  `window_start_default`, `window_end_default`, `reaction_mode_default`) are only the
+  defaults. They are used until you choose a value in Home Assistant, and ignored after that.
+- Switching the lamp on or off from Home Assistant always works, whatever the reaction mode.
+- Until the lamp knows the time (for example after a power cut without WiFi), motion switches
+  it on in every mode.
 
 ### Step 5: Test on the device (T024–T055)
 
@@ -189,11 +233,14 @@ The full procedure is in sections 7–9 of
    | 2. Stays on while someone is there | V5 (30 min), V6, then V3 and V4 again | |
    | 3. Reacts only after dark | V8, V9, V11 with V19, V23, V27; V10 over 3 days | After V9 and V27, set `longitude` back and use `run` again |
    | 4. Home Assistant | V13, V14, V15, V16, V20; V17 (1 h); V18 | Watch the log with `--no-states` |
-   | 5. Changing settings | V21, V24 | Set `on_period_ms` back to `"60000"` afterwards |
+   | 5. Changing settings | V21, V24 | Set `on_period_s` back to `"60"` afterwards |
+   | Feature 002: settings in Home Assistant | W1–W22 in [quickstart.md](specs/002-ha-tunable-settings/quickstart.md) | Power-cut trials: cut the power 2–5 s after the last change |
 
 - The lamp ignores motion in daylight, so run the timing tests after dark. To test during the
   day, set `longitude` about 180° away from the real value, use `run`, and set it back
   afterwards (scenario V9).
+- Tip: with Reaction mode `always` in Home Assistant, the timing tests can run in daylight too.
+  Set it back to `only when dark` afterwards.
 - Times come from the `t=` timestamps in the DEBUG log.
 - Repeat each scenario as often as the Trials table in section 8 says. Record each result in
   section 9.
@@ -210,7 +257,7 @@ The full procedure is in sections 7–9 of
 3. Upload over WiFi. Right after a `compile`, `upload` sends that new build:
 
    ```powershell
-   .venv\Scripts\esphome upload esphome/buitenlamp.yaml --device buitenlamp.local
+   .venv\Scripts\esphome upload esphome/buitenlamp.yaml --device kantoorlamp.local
    ```
 
 4. **Smoke test after dark (T060).** The INFO log has no timestamps, so time this with a
@@ -222,7 +269,7 @@ The full procedure is in sections 7–9 of
 5. Fill in the rest of section 9 of quickstart.md:
    - the strip current at full brightness;
    - which scenarios passed, and any exceptions;
-   - the date and the project version (`1.0.0`).
+   - the date and the project version (`1.2.0`).
 6. **Start the 60-day run (T061).** Write today's date in section 9. After 60 days without a
    restart, repeat V3 and V4 and record the result.
 
@@ -232,14 +279,21 @@ sensor cannot see through glass or clear plastic.
 
 ## Changing a setting later
 
+The on period, the fade times, the time window and the reaction mode are changed in Home
+Assistant (see "Settings in Home Assistant"). Only the other settings need an upload:
+
 1. Edit the value in the `substitutions:` block. Each setting has a comment giving its unit
    and allowed range.
 2. Build and upload over WiFi:
 
    ```powershell
-   .venv\Scripts\esphome run esphome/buitenlamp.yaml --device buitenlamp.local --no-states
+   .venv\Scripts\esphome run esphome/buitenlamp.yaml --device kantoorlamp.local --no-states
    ```
 
    A value out of range stops the build with a message, and nothing is uploaded.
+
+**Converting a 1.1.0 configuration**: 1.2.0 gives the timing defaults in seconds. Divide
+`on_period_ms`, `fade_in_ms` and `fade_out_ms` by 1000 and enter them as `on_period_s`,
+`fade_in_s` and `fade_out_s`.
 
 After an upload, the lamp restarts off and in automatic mode, and ignores motion for 30 s.

@@ -3,6 +3,11 @@
 **Feature**: [../spec.md](../spec.md) | **Covers**: FR-013, FR-022, FR-030, User Story 5,
 SC-008
 
+> **Changed in 1.2.0** (feature 002): `fade_in_ms`, `on_period_ms` and `fade_out_ms` are now
+> `fade_in_s`, `on_period_s` and `fade_out_s`, in seconds, and are only the defaults of
+> settings chosen in Home Assistant. See
+> [002 contracts/settings.md](../../002-ha-tunable-settings/contracts/settings.md).
+
 The owner changes the lamp's behaviour only by editing these two places and uploading the
 program again over WiFi. Nothing else in the configuration needs to change.
 
