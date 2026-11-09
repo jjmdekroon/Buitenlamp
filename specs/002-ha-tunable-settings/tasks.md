@@ -793,6 +793,12 @@ regression runs, and delivery.
   - Both go in the "Flash usage" and "Static RAM usage" rows of section 5 of
     `specs/002-ha-tunable-settings/quickstart.md`. Limits: RAM ≤ 75 %, flash ≤ 90 %.
   - Upload over WiFi.
+  - **Status (2026-11-09)**: done early, at the owner's request, before T030–T040. `log_level`
+    is `"INFO"`; config valid; compile passed, no warnings from `buitenlamp.yaml`. INFO: RAM
+    34.4 % (110566 bytes), flash 47.5 % (872278 bytes). DEBUG (T029 build): RAM 34.4 %
+    (110566 bytes), flash 48.1 % (882638 bytes). Recorded in section 5. Still open: the
+    upload. For the tests that read the DEBUG log (T039, T040 and the timing scenarios), set
+    `log_level` to `"DEBUG"` temporarily and back to `"INFO"` afterwards.
 - [ ] T042 Hands-on: smoke-test the INFO firmware and finish section 5 of
   `specs/002-ha-tunable-settings/quickstart.md`.
   - After dark, with the default settings: wave once, time the fade-in (about 1 s), the on

@@ -107,8 +107,8 @@ List each failed trial here with the scenario, the date and what was seen.
 | Item | Value |
 |------|-------|
 | ESPHome version, framework, variant | ESPHome 2026.10.1, esp-idf, `esp32c3` |
-| Flash usage (% and bytes), INFO and DEBUG | |
-| Static RAM usage (% and bytes) | |
+| Flash usage (% and bytes), INFO and DEBUG | INFO 47.5 % (872278 bytes); DEBUG 48.1 % (882638 bytes); limit 90 % |
+| Static RAM usage (% and bytes) | INFO and DEBUG 34.4 % (110566 bytes); limit 75 % |
 | Entity ids in Home Assistant (W1) | |
 | Smoothness at Fade-out time 60 s (W4) | |
 | Scenarios W1–W22 passed (list any exceptions) | |
