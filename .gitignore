@@ -1,0 +1,8 @@
+# WiFi credentials and the API/OTA encryption key; never committed (FR-022).
+esphome/secrets.yaml
+
+# ESPHome build output.
+esphome/.esphome/
+
+# Project virtual environment holding the pinned ESPHome (requirements.txt).
+.venv/
