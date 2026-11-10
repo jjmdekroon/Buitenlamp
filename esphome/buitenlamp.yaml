@@ -47,7 +47,7 @@ substitutions:
   pir_min_pulse_ms: "50"          # shortest signal that counts as motion; ms; 1-1000 (FR-011)
   manual_fallback_ms: "600000"    # time without Home Assistant before manual mode ends; ms;
                                   # 60000-86400000 (FR-029)
-  num_leds: "26"                  # pixels on the strip; 1-240 (research R3)
+  num_leds: "56"                  # pixels on the strip; 1-240 (research R3)
   led_channel_order: "GRBW"       # the strip's channel order; any order of R, G, B and W
   # Default on-colour and brightness, as a fraction of full (FR-017). These are only used until
   # a brightness and colour are chosen in Home Assistant; the lamp then keeps the chosen values,
